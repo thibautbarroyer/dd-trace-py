@@ -639,7 +639,7 @@ class Tracer(object):
 
         if self.enabled and self.writer:
             # only submit the spans if we're actually enabled (and don't crash :)
-            self.writer.write(spans=spans)
+            self.writer.write(trace=spans)
 
     @deprecated(message='Manually setting service info is no longer necessary', version='1.0.0')
     def set_service_info(self, *args, **kwargs):
