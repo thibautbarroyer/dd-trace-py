@@ -607,6 +607,16 @@ static inline int msgpack_pack_array(msgpack_packer* x, unsigned int n)
 }
 
 
+static inline int msgpack_set_header_array(msgpack_packer* x, unsigned int n)
+{
+        unsigned char buf[5];
+        buf[0] = 0xdd;
+        _msgpack_store32(&buf[1], (uint32_t)n);
+        memcpy(x->buf, buf, 5);
+        return 0;
+}
+
+
 /*
  * Map
  */

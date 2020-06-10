@@ -25,6 +25,7 @@ cdef extern from "pack.h":
     int msgpack_pack_float(msgpack_packer* pk, float d)
     int msgpack_pack_double(msgpack_packer* pk, double d)
     int msgpack_pack_array(msgpack_packer* pk, size_t l)
+    int msgpack_set_header_array(msgpack_packer* pk, size_t l)
     int msgpack_pack_map(msgpack_packer* pk, size_t l)
     int msgpack_pack_raw(msgpack_packer* pk, size_t l)
     int msgpack_pack_bin(msgpack_packer* pk, size_t l)
@@ -49,7 +50,7 @@ cdef inline int pack_bytes(msgpack_packer *pk, char *bytes, Py_ssize_t l):
     return ret
 
 
-cdef class Packer(object):
+cdef class TracePacker(object):
     """
     MessagePack Packer
 
@@ -85,14 +86,26 @@ cdef class Packer(object):
     cdef const char *unicode_errors
     cdef bool use_float
     cdef bint autoreset
+    cdef size_t ntraces
 
     def __cinit__(self):
-        cdef int buf_size = 1024*1024
+        cdef int buf_size = 8000000  # 8 MB
         self.pk.buf = <char*> PyMem_Malloc(buf_size)
         if self.pk.buf == NULL:
             raise MemoryError("Unable to allocate internal buffer.")
         self.pk.buf_size = buf_size
         self.pk.length = 0
+
+        # Pack the array header
+        # The buffer is a list of lists of spans
+        ret = msgpack_pack_array(&self.pk, 0)
+        # Manually encode the array header
+        # note that we do so as a 32bit integer so that we don't have to resize the buffer
+        # as the size increases
+        # TODO: any issues with this?
+        self.ntraces = 0
+        msgpack_set_header_array(&self.pk, self.ntraces)
+        self.pk.length = 5
 
     def __init__(self, default=None,
                  bint use_single_float=False, bint autoreset=True, bint use_bin_type=False):
@@ -304,6 +317,9 @@ cdef class Packer(object):
 
     cpdef pack(self, object obj):
         cdef int ret
+
+        self.reset()
+
         try:
             ret = self._pack(obj)
         except:
@@ -317,6 +333,20 @@ cdef class Packer(object):
             self.pk.length = 0
             return buf
 
+    cpdef size_t pack_trace(self, list trace):
+        cdef int ret
+        try:
+            self.ntraces += 1
+            ret = self._pack(trace)
+        except:
+            self.pk.length = 0
+            raise
+        if ret:  # should not happen.
+            raise RuntimeError("internal error")
+
+        return self.pk.length
+
+
     def reset(self):
         """Reset internal buffer.
 
@@ -324,8 +354,13 @@ cdef class Packer(object):
         """
         self.pk.length = 0
 
-    def bytes(self):
+    cpdef trace_reset(self):
+        self.pk.length = 5
+        self.ntraces = 0
+
+    cpdef bytes(self):
         """Return internal buffer contents as bytes object"""
+        msgpack_set_header_array(&self.pk, self.ntraces)
         return PyBytes_FromStringAndSize(self.pk.buf, self.pk.length)
 
     def getbuffer(self):
@@ -335,6 +370,10 @@ cdef class Packer(object):
 
 cdef class MsgpackEncoder(object):
     content_type = "application/msgpack"
+    cdef TracePacker packer
+
+    def __init__(self):
+        self.packer = TracePacker()
 
     cpdef decode(self, data):
         import msgpack
@@ -342,11 +381,20 @@ cdef class MsgpackEncoder(object):
             return msgpack.unpackb(data)
         return msgpack.unpackb(data, raw=True)
 
+    cpdef add_trace(self, list trace):
+        return self.packer.pack_trace(trace)
+
+    cpdef bytes(self):
+        try:
+            return self.packer.bytes()
+        finally:
+            self.packer.trace_reset()
+
     cpdef encode_trace(self, list trace):
-        return Packer().pack(trace)
+        return TracePacker().pack(trace)
 
     cpdef encode_traces(self, traces):
-        return Packer().pack(traces)
+        return TracePacker().pack(traces)
 
     cpdef join_encoded(self, objs):
         """Join a list of encoded objects together as a msgpack array"""
@@ -360,3 +408,4 @@ cdef class MsgpackEncoder(object):
             return struct.pack(">BH", 0xdc, count) + buf
         else:
             return struct.pack(">BI", 0xdd, count) + buf
+

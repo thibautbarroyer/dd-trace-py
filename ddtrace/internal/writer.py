@@ -80,11 +80,12 @@ class LogWriter:
 # Rename to collector?
 class AgentWriter(_worker.PeriodicWorkerThread):
 
-    PROCESSING_INTERVAL = 10
+    PROCESSING_INTERVAL = 2
 
+    MAX_PAYLOAD_SIZE = 10000000
     # Trace agent limit payload size of 10 MB
-    # 8 MB should be a good average efficient size
-    MAX_PAYLOAD_SIZE = 8 * 1000000
+    # 5 MB should be a good average efficient size
+    PAYLOAD_SIZE_THRESHOLD = 5 * 1000000
 
     def __init__(
         self,
@@ -106,13 +107,14 @@ class AgentWriter(_worker.PeriodicWorkerThread):
         self.encoder = encoding.Encoder()
 
         # Threshold which will trigger a flush
-        self._threshold = self.MAX_PAYLOAD_SIZE
+        self._threshold = self.PAYLOAD_SIZE_THRESHOLD
         self._payload_queue = collections.deque()
         self._filters = filters or []
         self._sampler = sampler
         self._priority_sampler = priority_sampler
         self._last_error_ts = 0
         self._payload_size = 0
+        self._lock = threading.Lock()
         self.dogstatsd = dogstatsd
 
         # TODO: should be "exporter"
@@ -172,46 +174,35 @@ class AgentWriter(_worker.PeriodicWorkerThread):
         if trace is None:
             return
 
-        encoded = self.encoder.encode_trace(trace)
-        encoded_size = len(encoded)
+        with self._lock:
+            self._payload_size = self.encoder.add_trace(trace)
 
-        if encoded_size >= self._threshold:
-            # TODO: break up the trace payload to be sent
-            pass
+            if self._payload_size >= self.MAX_PAYLOAD_SIZE:
+                # TODO: ugh this is might suck a bit
+                # we have to figure out a way to pull out some of the traces
+                # in order to be able to submit the payload
+                # it shouldn't be too hard if we keep track of trace
+                # information in the buffer eg store (trace_offset_in_buffer, trace_size_in_bytes)
+                raise NotImplementedError
 
-        self._payload_size += encoded_size
-        self._payload_queue.append(encoded)
-
-        if self._payload_size > self._threshold:
-            self.trigger()
+            if self._payload_size > self._threshold:
+                self.trigger()
 
     def flush(self):
-        payload_size = 0
-        payload = []
-
-        while payload_size < self._threshold and len(self._payload_queue):
-            encoded_trace = self._payload_queue.popleft()
-            payload.append(encoded_trace)
-            payload_size += len(encoded_trace)
-
-        if not payload_size:
-            return
-
-        # We can do better than this
-        joinedpayload = self.encoder.join_encoded(payload)
-        self._payload_size -= payload_size
-        print("FLUSH:", payload_size)
+        with self._lock:
+            payload = self.encoder.bytes()
+            payload_size = len(payload)
+            self._payload_size = 0
 
         # if self._send_stats:
         #     traces_queue_length = len(traces)
         #     traces_queue_spans = sum(map(len, traces))
 
-
         # if self._send_stats:
         #    traces_filtered = len(traces) - traces_queue_length
 
         # If we have data, let's try to send it.
-        traces_responses = self.api._put(self.api._traces, joinedpayload, payload_size)
+        traces_responses = self.api._put(self.api._traces, payload, payload_size)
 
         for response in traces_responses:
             if isinstance(response, Exception) or response.status >= 400:
