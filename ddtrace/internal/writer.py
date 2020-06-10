@@ -1,14 +1,12 @@
 # stdlib
+import collections
 import itertools
 import os
-import random
 import threading
 import time
 import sys
 
-from .. import api
-from .. import compat
-from .. import _worker
+from .. import api, compat, encoding, _worker
 from ..internal.logger import get_logger
 from ..sampler import BasePrioritySampler
 from ..settings import config
@@ -79,10 +77,14 @@ class LogWriter:
         self.out.flush()
 
 
+# Rename to collector?
 class AgentWriter(_worker.PeriodicWorkerThread):
 
-    QUEUE_PROCESSING_INTERVAL = 1
-    QUEUE_MAX_TRACES_DEFAULT = 1000
+    PROCESSING_INTERVAL = 1
+
+    # Trace agent limit payload size of 10 MB
+    # 8 MB should be a good average efficient size
+    MAX_PAYLOAD_SIZE = 8 * 1000000
 
     def __init__(
         self,
@@ -97,16 +99,23 @@ class AgentWriter(_worker.PeriodicWorkerThread):
         dogstatsd=None,
     ):
         super(AgentWriter, self).__init__(
-            interval=self.QUEUE_PROCESSING_INTERVAL, exit_timeout=shutdown_timeout, name=self.__class__.__name__
+            interval=self.PROCESSING_INTERVAL, exit_timeout=shutdown_timeout, name=self.__class__.__name__
         )
-        # DEV: provide a _temporary_ solution to allow users to specify a custom max
-        maxsize = int(os.getenv("DD_TRACE_MAX_TPS", self.QUEUE_MAX_TRACES_DEFAULT))
-        self._trace_queue = Q(maxsize=maxsize)
-        self._filters = filters
+
+        # why is this an object if it has no STATEAFDASJKFKASDFDASJKDFJKASDFad
+        self.encoder = encoding.Encoder()
+
+        # Threshold which will trigger a flush
+        self._threshold = self.MAX_PAYLOAD_SIZE
+        self._payload_queue = collections.deque()
+        self._filters = filters or []
         self._sampler = sampler
         self._priority_sampler = priority_sampler
         self._last_error_ts = 0
+        self._payload_size = 0
         self.dogstatsd = dogstatsd
+
+        # TODO: should be "exporter"
         self.api = api.API(
             hostname, port, uds_path=uds_path, https=https, priority_sampling=priority_sampler is not None
         )
@@ -138,7 +147,7 @@ class AgentWriter(_worker.PeriodicWorkerThread):
         """Determine if we're sending stats or not."""
         return bool(config.health_metrics_enabled and self.dogstatsd)
 
-    def write(self, spans=None, services=None):
+    def write(self, trace=None, services=None):
         # Start the AgentWriter on first write.
         # Starting it earlier might be an issue with gevent, see:
         # https://github.com/DataDog/dd-trace-py/issues/1192
@@ -147,32 +156,59 @@ class AgentWriter(_worker.PeriodicWorkerThread):
                 if self._started is False:
                     self.start()
                     self._started = True
-        if spans:
-            self._trace_queue.put(spans)
 
-    def flush_queue(self):
-        try:
-            traces = self._trace_queue.get(block=False)
-        except Empty:
+        if not trace:
             return
-
-        if self._send_stats:
-            traces_queue_length = len(traces)
-            traces_queue_spans = sum(map(len, traces))
 
         # Before sending the traces, make them go through the
         # filters
         try:
-            traces = _apply_filters(self._filters, traces)
+            for f in self._filters:
+                trace = f.process_trace(trace)
         except Exception:
             log.error("error while filtering traces", exc_info=True)
             return
 
-        if self._send_stats:
-            traces_filtered = len(traces) - traces_queue_length
+        if trace is None:
+            return
+
+        encoded = self.encoder.encode_trace(trace)
+        encoded_size = len(encoded)
+
+        if encoded_size >= self._threshold:
+            # TODO: break up the trace payload to be sent
+            pass
+
+        self._payload_size += encoded_size
+        self._payload_queue.append(encoded)
+
+        print(self._payload_size)
+
+        if self._payload_size > self._threshold:
+            self.trigger()
+
+    def flush(self):
+        payload_size = 0
+        payload = []
+
+        while payload_size < self._threshold and len(self._payload_queue):
+            payload.append(self._payload_queue.popleft())
+            payload_size += len(payload)
+
+        # We can do better than this
+        joinedpayload = self.encoder.join_encoded(payload)
+
+        # if self._send_stats:
+        #     traces_queue_length = len(traces)
+        #     traces_queue_spans = sum(map(len, traces))
+
+
+        # if self._send_stats:
+        #    traces_filtered = len(traces) - traces_queue_length
 
         # If we have data, let's try to send it.
-        traces_responses = self.api.send_traces(traces)
+        traces_responses = self.api._put(self.api._traces, joinedpayload, payload_size)
+
         for response in traces_responses:
             if isinstance(response, Exception) or response.status >= 400:
                 self._log_error_status(response)
@@ -189,35 +225,35 @@ class AgentWriter(_worker.PeriodicWorkerThread):
         # Dump statistics
         # NOTE: Do not use the buffering of dogstatsd as it's not thread-safe
         # https://github.com/DataDog/datadogpy/issues/439
-        if self._send_stats:
-            # Statistics about the queue length, size and number of spans
-            self.dogstatsd.increment("datadog.tracer.flushes")
-            self._histogram_with_total("datadog.tracer.flush.traces", traces_queue_length)
-            self._histogram_with_total("datadog.tracer.flush.spans", traces_queue_spans)
+        # if self._send_stats:
+        #     # Statistics about the queue length, size and number of spans
+        #     self.dogstatsd.increment("datadog.tracer.flushes")
+        #     self._histogram_with_total("datadog.tracer.flush.traces", traces_queue_length)
+        #     self._histogram_with_total("datadog.tracer.flush.spans", traces_queue_spans)
 
-            # Statistics about the filtering
-            self._histogram_with_total("datadog.tracer.flush.traces_filtered", traces_filtered)
+        #     # Statistics about the filtering
+        #     self._histogram_with_total("datadog.tracer.flush.traces_filtered", traces_filtered)
 
-            # Statistics about API
-            self._histogram_with_total("datadog.tracer.api.requests", len(traces_responses))
+        #     # Statistics about API
+        #     self._histogram_with_total("datadog.tracer.api.requests", len(traces_responses))
 
-            self._histogram_with_total(
-                "datadog.tracer.api.errors", len(list(t for t in traces_responses if isinstance(t, Exception)))
-            )
-            for status, grouped_responses in itertools.groupby(
-                sorted((t for t in traces_responses if not isinstance(t, Exception)), key=lambda r: r.status),
-                key=lambda r: r.status,
-            ):
-                self._histogram_with_total(
-                    "datadog.tracer.api.responses", len(list(grouped_responses)), tags=["status:%d" % status]
-                )
+        #     self._histogram_with_total(
+        #         "datadog.tracer.api.errors", len(list(t for t in traces_responses if isinstance(t, Exception)))
+        #     )
+        #     for status, grouped_responses in itertools.groupby(
+        #         sorted((t for t in traces_responses if not isinstance(t, Exception)), key=lambda r: r.status),
+        #         key=lambda r: r.status,
+        #     ):
+        #         self._histogram_with_total(
+        #             "datadog.tracer.api.responses", len(list(grouped_responses)), tags=["status:%d" % status]
+        #         )
 
-            # Statistics about the writer thread
-            if hasattr(time, "thread_time"):
-                new_thread_time = time.thread_time()
-                diff = new_thread_time - self._last_thread_time
-                self._last_thread_time = new_thread_time
-                self.dogstatsd.histogram("datadog.tracer.writer.cpu_time", diff)
+        #     # Statistics about the writer thread
+        #     if hasattr(time, "thread_time"):
+        #         new_thread_time = time.thread_time()
+        #         diff = new_thread_time - self._last_thread_time
+        #         self._last_thread_time = new_thread_time
+        #         self.dogstatsd.histogram("datadog.tracer.writer.cpu_time", diff)
 
     def _histogram_with_total(self, name, value, tags=None):
         """Helper to add metric as a histogram and with a `.total` counter"""
@@ -229,17 +265,17 @@ class AgentWriter(_worker.PeriodicWorkerThread):
             self.dogstatsd.gauge("datadog.tracer.heartbeat", 1)
 
         try:
-            self.flush_queue()
+            self.flush()
         finally:
             if not self._send_stats:
                 return
 
             # Statistics about the rate at which spans are inserted in the queue
-            dropped, enqueued, enqueued_lengths = self._trace_queue.reset_stats()
-            self.dogstatsd.gauge("datadog.tracer.queue.max_length", self._trace_queue.maxsize)
-            self.dogstatsd.increment("datadog.tracer.queue.dropped.traces", dropped)
-            self.dogstatsd.increment("datadog.tracer.queue.enqueued.traces", enqueued)
-            self.dogstatsd.increment("datadog.tracer.queue.enqueued.spans", enqueued_lengths)
+            # dropped, enqueued, enqueued_lengths = self._trace_queue.reset_stats()
+            # self.dogstatsd.gauge("datadog.tracer.queue.max_length", self._trace_queue.maxsize)
+            # self.dogstatsd.increment("datadog.tracer.queue.dropped.traces", dropped)
+            # self.dogstatsd.increment("datadog.tracer.queue.enqueued.traces", enqueued)
+            # self.dogstatsd.increment("datadog.tracer.queue.enqueued.spans", enqueued_lengths)
 
     def on_shutdown(self):
         try:
@@ -271,67 +307,67 @@ class AgentWriter(_worker.PeriodicWorkerThread):
             )
 
 
-class Q(Queue):
-    """
-    Q is a threadsafe queue that let's you pop everything at once and
-    will randomly overwrite elements when it's over the max size.
-
-    This queue also exposes some statistics about its length, the number of items dropped, etc.
-    """
-
-    def __init__(self, maxsize=0):
-        # Cannot use super() here because Queue in Python2 is old style class
-        Queue.__init__(self, maxsize)
-        # Number of item dropped (queue full)
-        self.dropped = 0
-        # Number of items accepted
-        self.accepted = 0
-        # Cumulative length of accepted items
-        self.accepted_lengths = 0
-
-    def put(self, item):
-        try:
-            # Cannot use super() here because Queue in Python2 is old style class
-            Queue.put(self, item, block=False)
-        except Full:
-            # If the queue is full, replace a random item. We need to make sure
-            # the queue is not emptied was emptied in the meantime, so we lock
-            # check qsize value.
-            with self.mutex:
-                qsize = self._qsize()
-                if qsize >= self.maxsize:
-                    idx = random.randrange(0, qsize)
-                    self.queue[idx] = item
-                    log.warning("Writer queue is full has more than %d traces, some traces will be lost", self.maxsize)
-                    self.dropped += 1
-                    self._update_stats(item)
-                    return
-            # The queue has been emptied, simply retry putting item
-            return self.put(item)
-        else:
-            with self.mutex:
-                self._update_stats(item)
-
-    def _update_stats(self, item):
-        # self.mutex needs to be locked to make sure we don't lose data when resetting
-        self.accepted += 1
-        if hasattr(item, "__len__"):
-            item_length = len(item)
-        else:
-            item_length = 1
-        self.accepted_lengths += item_length
-
-    def reset_stats(self):
-        """Reset the stats to 0.
-
-        :return: The current value of dropped, accepted and accepted_lengths.
-        """
-        with self.mutex:
-            dropped, accepted, accepted_lengths = (self.dropped, self.accepted, self.accepted_lengths)
-            self.dropped, self.accepted, self.accepted_lengths = 0, 0, 0
-        return dropped, accepted, accepted_lengths
-
-    def _get(self):
-        things = self.queue
-        self._init(self.maxsize)
-        return things
+# class Q(Queue):
+#     """
+#     Q is a threadsafe queue that let's you pop everything at once and
+#     will randomly overwrite elements when it's over the max size.
+#
+#     This queue also exposes some statistics about its length, the number of items dropped, etc.
+#     """
+#
+#     def __init__(self, maxsize=0):
+#         # Cannot use super() here because Queue in Python2 is old style class
+#         Queue.__init__(self, maxsize)
+#         # Number of item dropped (queue full)
+#         self.dropped = 0
+#         # Number of items accepted
+#         self.accepted = 0
+#         # Cumulative length of accepted items
+#         self.accepted_lengths = 0
+#
+#     def put(self, item):
+#         try:
+#             # Cannot use super() here because Queue in Python2 is old style class
+#             Queue.put(self, item, block=False)
+#         except Full:
+#             # If the queue is full, replace a random item. We need to make sure
+#             # the queue is not emptied was emptied in the meantime, so we lock
+#             # check qsize value.
+#             with self.mutex:
+#                 qsize = self._qsize()
+#                 if qsize >= self.maxsize:
+#                     idx = random.randrange(0, qsize)
+#                     self.queue[idx] = item
+#                     log.warning("Writer queue is full has more than %d traces, some traces will be lost", self.maxsize)
+#                     self.dropped += 1
+#                     self._update_stats(item)
+#                     return
+#             # The queue has been emptied, simply retry putting item
+#             return self.put(item)
+#         else:
+#             with self.mutex:
+#                 self._update_stats(item)
+#
+#     def _update_stats(self, item):
+#         # self.mutex needs to be locked to make sure we don't lose data when resetting
+#         self.accepted += 1
+#         if hasattr(item, "__len__"):
+#             item_length = len(item)
+#         else:
+#             item_length = 1
+#         self.accepted_lengths += item_length
+#
+#     def reset_stats(self):
+#         """Reset the stats to 0.
+#
+#         :return: The current value of dropped, accepted and accepted_lengths.
+#         """
+#         with self.mutex:
+#             dropped, accepted, accepted_lengths = (self.dropped, self.accepted, self.accepted_lengths)
+#             self.dropped, self.accepted, self.accepted_lengths = 0, 0, 0
+#         return dropped, accepted, accepted_lengths
+#
+#     def _get(self):
+#         things = self.queue
+#         self._init(self.maxsize)
+#         return things

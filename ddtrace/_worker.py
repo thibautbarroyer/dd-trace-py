@@ -31,7 +31,8 @@ class PeriodicWorkerThread(object):
 
         self._thread = threading.Thread(target=self._target, name=name)
         self._thread.daemon = daemon
-        self._stop = threading.Event()
+        self._wake = threading.Event()
+        self._stop = False
         self.started = False
         self.interval = interval
         self.exit_timeout = exit_timeout
@@ -53,10 +54,14 @@ class PeriodicWorkerThread(object):
         self._thread.start()
         self.started = True
 
+    def trigger(self):
+        self._wake.set()
+
     def stop(self):
         """Stop the worker."""
         _LOG.debug('Stopping %s thread', self._thread.name)
-        self._stop.set()
+        self._stop = True
+        self._wake.set()
 
     def is_alive(self):
         return self._thread.is_alive()
@@ -65,8 +70,12 @@ class PeriodicWorkerThread(object):
         return self._thread.join(timeout)
 
     def _target(self):
-        while not self._stop.wait(self.interval):
+        while not self._stop:
+            self._wake.wait(self.interval)
+            print("RUNNING TARGET")
             self.run_periodic()
+            self._wake.clear()
+
         self._on_shutdown()
 
     @staticmethod
