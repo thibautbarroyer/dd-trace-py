@@ -1012,3 +1012,17 @@ def test_deregister_start_span_hooks():
     t.start_span("hello")
 
     assert result == {}
+
+
+
+def test_ctx():
+    t = ddtrace.Tracer()
+
+    ctx = t.get_call_context()
+
+    s = t.trace("")
+
+    ctx2 = t.get_call_context()
+
+
+    assert ctx == ctx2
