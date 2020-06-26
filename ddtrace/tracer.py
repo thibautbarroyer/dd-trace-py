@@ -16,7 +16,7 @@ from .context import Context
 from .sampler import DatadogSampler, RateSampler, RateByServiceSampler
 from .settings import config
 from .span import Span
-from .utils.formats import get_env, parse_tags_str
+from .utils.formats import asbool, get_env, parse_tags_str
 from .utils.deprecation import deprecated, RemovedInDDTrace10Warning
 from .vendor.dogstatsd import DogStatsd
 from . import compat
@@ -132,7 +132,7 @@ class Tracer(object):
 
         # Apply the default configuration
         self.configure(
-            enabled=True,
+            enabled=asbool(environ.get("DATADOG_TRACE_ENABLED")),
             hostname=hostname,
             port=port,
             https=https,
