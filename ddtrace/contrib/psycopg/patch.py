@@ -1,8 +1,8 @@
-# 3p
+import os
+
 import psycopg2
 from ddtrace.vendor import wrapt
 
-# project
 from ddtrace import Pin, config
 from ddtrace.contrib import dbapi
 from ddtrace.ext import sql, net, db
@@ -21,6 +21,11 @@ except Exception:
 
 if PSYCOPG2_VERSION >= (2, 7):
     from psycopg2.sql import Composable
+
+
+config._add("pyscopg2", dict(
+    service=os.getenv("DD_PSYCOPG2_SERVICE") or "postgres",
+))
 
 
 def patch():
@@ -43,6 +48,10 @@ def unpatch():
 
 class Psycopg2TracedCursor(dbapi.TracedCursor):
     """ TracedCursor for psycopg2 """
+
+    def __init__(self, conn, pin=None, cursor_cls=None):
+        super(Psycopg2TracedCursor, self).__init__(conn, pin, config=config.psycopg2, cursor_cls=cursor_cls)
+
     def _trace_method(self, method, name, resource, extra_tags, *args, **kwargs):
         # treat psycopg2.sql.Composable resource objects as strings
         if PSYCOPG2_VERSION >= (2, 7) and isinstance(resource, Composable):
@@ -65,7 +74,7 @@ class Psycopg2TracedConnection(dbapi.TracedConnection):
             if config.dbapi2.trace_fetch_methods:
                 cursor_cls = Psycopg2FetchTracedCursor
 
-        super(Psycopg2TracedConnection, self).__init__(conn, pin, cursor_cls=cursor_cls)
+        super(Psycopg2TracedConnection, self).__init__(conn, pin, config=config.psycopg2, cursor_cls=cursor_cls)
 
 
 def patch_conn(conn, traced_conn_cls=Psycopg2TracedConnection):
@@ -87,7 +96,7 @@ def patch_conn(conn, traced_conn_cls=Psycopg2TracedConnection):
     }
 
     Pin(
-        service='postgres',
+        service=None,
         app='postgres',
         tags=tags).onto(c)
 

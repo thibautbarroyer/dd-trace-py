@@ -7,6 +7,7 @@ from ...ext import SpanTypes, sql
 from ...internal.logger import get_logger
 from ...pin import Pin
 from ...settings import config
+from ... import utils
 from ...utils.formats import asbool, get_env
 from ...vendor import wrapt
 
@@ -21,7 +22,7 @@ config._add('dbapi2', dict(
 class TracedCursor(wrapt.ObjectProxy):
     """ TracedCursor wraps a psql cursor and traces its queries. """
 
-    def __init__(self, cursor, pin):
+    def __init__(self, cursor, pin, config=None):
         super(TracedCursor, self).__init__(cursor)
         pin.onto(self)
         name = pin.app or 'sql'
@@ -35,6 +36,7 @@ class TracedCursor(wrapt.ObjectProxy):
         :param name: The name of the resulting span.
         :param resource: The sql query. Sql queries are obfuscated on the agent side.
         :param extra_tags: A dict of tags to store into the span's meta
+        :param config: The integration config to retrieve settings from.
         :param args: The args that will be passed as positional args to the wrapped method
         :param kwargs: The args that will be passed as kwargs to the wrapped method
         :return: The result of the wrapped method invocation
@@ -42,7 +44,8 @@ class TracedCursor(wrapt.ObjectProxy):
         pin = Pin.get_from(self)
         if not pin or not pin.enabled():
             return method(*args, **kwargs)
-        service = pin.service
+        print(iconfig)
+        service = utils.integration_service(iconfig, pin)
         measured = name == self._self_datadog_name
         with pin.tracer.trace(name, service=service, resource=resource, span_type=SpanTypes.SQL) as s:
             if measured:
@@ -113,6 +116,7 @@ class FetchTracedCursor(TracedCursor):
 
     We do not trace these functions by default since they can get very noisy (e.g. `fetchone` with 100k rows).
     """
+
     def fetchone(self, *args, **kwargs):
         """ Wraps the cursor.fetchone method"""
         span_name = '{}.{}'.format(self._self_datadog_name, 'fetchone')
@@ -146,6 +150,8 @@ class FetchTracedCursor(TracedCursor):
 class TracedConnection(wrapt.ObjectProxy):
     """ TracedConnection wraps a Connection with tracing code. """
 
+    _dd_config = None
+
     def __init__(self, conn, pin=None, cursor_cls=None):
         # Set default cursor class if one was not provided
         if not cursor_cls:
@@ -167,7 +173,7 @@ class TracedConnection(wrapt.ObjectProxy):
         pin = Pin.get_from(self)
         if not pin or not pin.enabled():
             return method(*args, **kwargs)
-        service = pin.service
+        service = utils.integration_service(self._dd_config, pin)
 
         with pin.tracer.trace(name, service=service) as s:
             s.set_tags(pin.tags)

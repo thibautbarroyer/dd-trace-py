@@ -262,6 +262,8 @@ class PsycopgCore(BaseTracerTestCase):
         conn = self._get_conn()
         conn.commit()
 
+        print(self.TEST_SERVICE)
+        print(self.get_spans()[0].service)
         self.assert_structure(
             dict(name='postgres.connection.commit', service=self.TEST_SERVICE)
         )

@@ -31,7 +31,9 @@ def integration_service(config, pin, global_service_fallback=False):
     """Compute the service name that should be used for an integration
     based off the given config and pin instances.
     """
-    if pin.service:
+    config = config or {}
+
+    if pin and pin.service:
         return pin.service
 
     # Integrations unfortunately use both service and service_name in their
