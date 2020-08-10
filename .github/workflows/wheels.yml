@@ -1,7 +1,7 @@
 name: Build
 
 on:
-  pull_request:
+  push:
   release:
     types:
       - published
@@ -34,6 +34,8 @@ jobs:
           python -m cibuildwheel --output-dir wheelhouse
         env:
           CIBW_SKIP: pp* cp27-win*
+          CIBW_TEST_REQUIRES: pytest pytest-benchmark
+          CIBW_TEST_COMMAND: pytest {project}/tests/tracer
 
       - uses: actions/upload-artifact@v2
         with:
