@@ -1,5 +1,3 @@
-import time
-
 import mock
 
 from ddtrace.ext import SpanTypes
@@ -72,27 +70,26 @@ class TestRuntimeMetrics(BaseTestCase):
 
 class TestRuntimeWorker(TracerTestCase):
     def test_tracer_metrics(self):
-        # Mock socket.socket to hijack the dogstatsd socket
-        with mock.patch('socket.socket'):
+        from ddtrace import tracer
+
+        with mock.patch('ddtrace.vendor.dogstatsd.base.socket.socket'):
             # configure tracer for runtime metrics
-            self.tracer._RUNTIME_METRICS_INTERVAL = 1. / 4
-            self.tracer.configure(collect_metrics=True)
-            self.tracer.set_tags({'env': 'tests.dog'})
+            tracer.configure(collect_metrics=True)
+            tracer.set_tags({'env': 'tests.dog'})
 
-            with self.override_global_tracer(self.tracer):
-                # spans are started for three services but only web and worker
-                # span types should be included in tags for runtime metrics
-                root = self.start_span('parent', service='parent', span_type=SpanTypes.WEB)
-                context = root.context
-                child = self.start_span('child', service='child', span_type=SpanTypes.WORKER, child_of=context)
-                self.start_span('query', service='db', span_type=SpanTypes.SQL, child_of=child.context)
+            # spans are started for three services but only web and worker
+            # span types should be included in tags for runtime metrics
+            with tracer.trace('parent', service='parent', span_type=SpanTypes.WEB):
+                with tracer.trace('child', service='child', span_type=SpanTypes.WORKER):
+                    with tracer.trace('query', service='db', span_type=SpanTypes.SQL):
+                        pass
 
-            time.sleep(self.tracer._RUNTIME_METRICS_INTERVAL * 2)
+            tracer._runtime_worker.flush()
 
             # Get the socket before it disappears
-            statsd_socket = self.tracer._dogstatsd_client.socket
-            # now stop collection
-            self.tracer.configure(collect_metrics=False)
+            statsd_socket = tracer._dogstatsd_client.socket
+
+        tracer.configure(collect_metrics=False)
 
         received = [
             s.args[0].decode('utf-8') for s in statsd_socket.send.mock_calls
