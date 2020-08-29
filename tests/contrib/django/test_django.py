@@ -1,7 +1,6 @@
 import django
 from django.views.generic import TemplateView
 from django.test import modify_settings, override_settings
-import os
 import pytest
 
 from ddtrace import config
@@ -14,8 +13,6 @@ from ddtrace.propagation.utils import get_wsgi_header
 
 from tests import override_config, override_global_config, override_http_config, assert_dict_issuperset
 from tests.opentracer.utils import init_tracer
-
-pytestmark = pytest.mark.skipif("TEST_DATADOG_DJANGO_MIGRATION" in os.environ, reason="test only without migration")
 
 
 @pytest.mark.skipif(django.VERSION < (2, 0, 0), reason="")

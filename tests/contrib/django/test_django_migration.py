@@ -1,16 +1,10 @@
 import django
-import os
-import pytest
 
 from ddtrace import config, Pin
 from ddtrace.contrib.django.conf import configure_from_settings
 
 from tests import override_config
 
-
-pytestmark = pytest.mark.skipif(
-    "TEST_DATADOG_DJANGO_MIGRATION" not in os.environ, reason="test only relevant for migration"
-)
 
 """
 migration tests
