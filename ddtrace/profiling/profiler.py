@@ -117,9 +117,9 @@ class Profiler(object):
         )
         return [
             stack.StackCollector(r, tracer=tracer),
-            memory.MemoryCollector(r),
-            exceptions.UncaughtExceptionCollector(r),
-            threading.LockCollector(r),
+            #memory.MemoryCollector(r),
+            #exceptions.UncaughtExceptionCollector(r),
+            #threading.LockCollector(r),
         ]
 
     def __attrs_post_init__(self):
